@@ -8,7 +8,7 @@ export const SUPABASE_KEY = 'sb_publishable_vv6cd3z8vRDlmNQPHkBtrA_NfAdmCzo';
 
 // The shared reviewer account. Empty until the review is set up; while it is
 // empty the unlock screen says so instead of asking for the password.
-export const REVIEWER_EMAIL = '';
+export const REVIEWER_EMAIL = 'translation-review@example.org';
 
 export const TABLE = 'translation_suggestions';
 
