@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "keySalt": "Bc83iQ2I4d3PdGxQrNWCHA==",
+  "iterations": 600000,
+  "languages": [
+    {
+      "lang": "es",
+      "language": "Español",
+      "file": "es.json.enc",
+      "snapshot": "es-20261111-2"
+    }
+  ]
+}
