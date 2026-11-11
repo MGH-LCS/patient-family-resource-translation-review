@@ -7,7 +7,7 @@
 // into an outbox on this computer first and is then sent, so nothing typed is
 // lost when the network drops.
 
-import { SUPABASE_URL, SUPABASE_KEY, REVIEWER_EMAIL, TABLE, APP_SUBTITLE } from './config.js?v=1';
+import { SUPABASE_URL, SUPABASE_KEY, REVIEWER_EMAIL, TABLE, APP_SUBTITLE } from './config.js?v=2';
 
 // ---------------------------------------------------------------------------
 // Small helpers
