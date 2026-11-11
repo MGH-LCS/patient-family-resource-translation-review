@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<!-- Scripts only from this site and cdnjs; requests only to this site and Supabase
+     (plus this computer, for trying the page out). The form can never be sent
+     anywhere by the browser itself, so the password can't end up in a URL. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Translation review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap">
+<link rel="stylesheet" href="style.css?v=1">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.12/marked.min.js" integrity="sha512-rCQgmUulW6f6QegOvTntKKb5IAoxTpGVCdWqYjkXEpzAns6XUFs8NKVqWe+KQpctp/EoRSFSuykVputqknLYMg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js" integrity="sha512-YlctBG9PGZIhh9keoqI3eZkQM9T8QUbiBi7qNYAO/TUEo8jqWX5pLp5+x1cKRQDRzJ/lyGyJ9WUVNIRduxIIFw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script type="module" src="app.js?v=1"></script>
+</head>
+<body>
+
+<div id="unlock" class="unlock">
+  <form id="unlock-form" class="unlock-card" method="post" action="#" novalidate>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">Aa</div>
+      <div>
+        <h1 class="brand-title">Translation review</h1>
+        <p class="brand-sub" id="unlock-sub"></p>
+      </div>
+    </div>
+    <p id="unlock-status" class="unlock-status" role="status">Loading…</p>
+    <div id="unlock-fields" hidden>
+      <label class="field-label" for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" class="input" required>
+      <label class="check">
+        <input id="remember" type="checkbox">
+        <span>Remember me on this computer</span>
+      </label>
+      <p class="hint">Only tick this on your own computer, not a shared one.</p>
+      <button id="unlock-btn" type="submit" class="btn btn-primary btn-block">Unlock</button>
+      <p id="unlock-error" class="unlock-error" role="alert"></p>
+      <p id="unlock-waiting" class="hint" hidden></p>
+    </div>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <a class="skip" href="#results">Skip to the text</a>
+  <header class="top">
+    <div class="brand">
+      <div class="brand-mark" id="lang-mark" aria-hidden="true"></div>
+      <div>
+        <div class="brand-title">Translation review</div>
+        <div class="brand-sub" id="app-sub"></div>
+      </div>
+    </div>
+    <label class="lang-pick">Language
+      <select id="lang-select" class="select"></select>
+    </label>
+    <div class="top-spacer"></div>
+    <div class="who">Reviewing as <strong id="who-name"></strong> · <button type="button" id="change-name" class="link-btn">change</button></div>
+    <div id="save-state" class="save-state" role="status" aria-live="polite"></div>
+    <button type="button" id="lock-btn" class="btn btn-quiet">Lock</button>
+  </header>
+
+  <div class="layout">
+    <nav class="side" aria-label="What to review">
+      <h2 class="side-title">What to review</h2>
+      <div id="group-nav" class="group-nav"></div>
+      <div class="how">
+        <h3>How this works</h3>
+        <p id="how-text"></p>
+        <button type="button" id="style-link-side" class="link-btn">Read the style guide</button>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="toolbar">
+        <div id="filters" class="filters" role="group" aria-label="Show"></div>
+        <div class="toolbar-spacer"></div>
+        <label class="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+          <span class="sr-only">Search</span>
+          <input id="search" type="search" autocomplete="off">
+        </label>
+      </div>
+      <div id="banner" class="banner" role="status" hidden></div>
+      <h2 id="results" class="results" tabindex="-1"></h2>
+      <div id="list" class="list"></div>
+      <div id="more" class="more"></div>
+    </main>
+  </div>
+</div>
+
+<dialog id="welcome" class="dialog" aria-labelledby="welcome-title">
+  <form id="welcome-form" method="dialog" novalidate>
+    <h2 id="welcome-title" class="dialog-title"></h2>
+    <div id="name-part">
+      <label class="field-label" for="name-input">Your name</label>
+      <input id="name-input" class="input" maxlength="40" autocomplete="name" placeholder="First name and last initial">
+      <p class="hint">Other reviewers and Mark see it next to your work. For example: Ana R.</p>
+      <p id="name-error" class="unlock-error" role="alert"></p>
+    </div>
+    <div id="note-part">
+      <h3 class="dialog-sub">How to write it</h3>
+      <div id="style-note" class="style-note"></div>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="welcome-cancel" class="btn btn-quiet">Cancel</button>
+      <button type="submit" id="welcome-go" class="btn btn-primary"></button>
+    </div>
+  </form>
+</dialog>
+
+<noscript><p class="noscript">This page needs JavaScript turned on.</p></noscript>
+</body>
+</html>
