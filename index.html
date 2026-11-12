@@ -13,10 +13,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap">
-<link rel="stylesheet" href="style.css?v=1">
+<link rel="stylesheet" href="style.css?v=2">
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.12/marked.min.js" integrity="sha512-rCQgmUulW6f6QegOvTntKKb5IAoxTpGVCdWqYjkXEpzAns6XUFs8NKVqWe+KQpctp/EoRSFSuykVputqknLYMg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js" integrity="sha512-YlctBG9PGZIhh9keoqI3eZkQM9T8QUbiBi7qNYAO/TUEo8jqWX5pLp5+x1cKRQDRzJ/lyGyJ9WUVNIRduxIIFw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<script type="module" src="app.js?v=2"></script>
+<script type="module" src="app.js?v=3"></script>
 </head>
 <body>
 
@@ -90,8 +90,24 @@
       <div id="list" class="list"></div>
       <div id="more" class="more"></div>
     </main>
+
+    <aside id="preview" class="preview" aria-labelledby="pv-title">
+      <div class="pv-head">
+        <h2 id="pv-title" class="pv-title">How families see it</h2>
+        <button type="button" id="pv-close" class="btn btn-quiet pv-close">Close</button>
+      </div>
+      <div class="pv-views" role="group" aria-label="Which text to show">
+        <button type="button" data-view="now" aria-pressed="false">Now</button>
+        <button type="button" data-view="mine" aria-pressed="true">With my changes</button>
+        <button type="button" data-view="en" aria-pressed="false">English</button>
+      </div>
+      <div class="pv-phone"><div id="pv-screen" class="pv-screen"></div></div>
+      <p id="pv-note" class="pv-note"></p>
+    </aside>
   </div>
 </div>
+
+<button type="button" id="pv-open" class="pv-open" hidden>Preview</button>
 
 <dialog id="welcome" class="dialog" aria-labelledby="welcome-title">
   <form id="welcome-form" method="dialog" novalidate>

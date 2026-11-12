@@ -885,6 +885,7 @@ function refreshDerived(keys) {
   renderFilters();
   renderGroups();
   renderSaveState();
+  pvSchedule();
 }
 
 // ---------- Filters, groups, search ----------
@@ -991,6 +992,7 @@ function rebuildList() {
   renderFilters();
   renderGroups();
   showMore();
+  pvReset();
 }
 
 ui.list.addEventListener('click', (ev) => {
@@ -1467,6 +1469,303 @@ function startTimers() {
     if (ev.key === K.outbox && state.unlocked) refreshDerived(null);
     if (ev.key === K.session && ev.newValue === null && state.unlocked && !readStoredSession()) location.reload();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Phone preview: the resource or page you're working in, drawn the way the
+// app draws it. The piece you're on is ringed; your changes are yellow.
+// Everything goes through esc() or textHtml() (DOMPurify), like the list.
+// ---------------------------------------------------------------------------
+
+const PREVIEW_GROUPS = new Set(['resources', 'category_pages']);
+const pv = {
+  el: $('#preview'),
+  screen: $('#pv-screen'),
+  note: $('#pv-note'),
+  openBtn: $('#pv-open'),
+  view: 'mine', // 'now' | 'mine' | 'en'
+  item: null,
+  key: null,
+  queued: false,
+};
+
+const ICONS = {
+  phone: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>',
+  mail: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>',
+  link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>',
+  play: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>',
+  doc: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
+  box: '<span class="pv-tick" aria-hidden="true"></span>',
+};
+
+/** The reviewer's own text for a piece: what's in their box now, else their saved suggestion. */
+function myText(e) {
+  const box = state.rendered.get(e.key)?.querySelector('.box:not(.note-box)');
+  const typed = box?.value.trim();
+  if (typed) return typed;
+  const mine = infoOf(e.key).mine;
+  return mine?.verdict === 'suggest' ? (mine.suggested || '').trim() : '';
+}
+
+/** Which tokens of `after` are new compared with `before` (word level). */
+function addedTokens(before, after) {
+  const a = before.split(/(\s+)/).filter(Boolean);
+  const b = after.split(/(\s+)/).filter(Boolean);
+  if (a.length * b.length > 400000) return b.map((t) => ({ t, added: true }));
+  const L = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (j < b.length) {
+    if (i < a.length && a[i] === b[j]) { out.push({ t: b[j], added: false }); i++; j++; }
+    else if (i < a.length && L[i + 1][j] >= L[i][j + 1]) i++;
+    else { out.push({ t: b[j], added: true }); j++; }
+  }
+  return out;
+}
+
+const MARK_OPEN = '';
+const MARK_CLOSE = '';
+
+/** `after` rendered with the words that differ from `before` in yellow. */
+function changedHtml(before, after, markdown) {
+  // In markdown only plain words are marked, so the markers never land inside link or emphasis syntax.
+  const plainWord = /^[^\s[\]()*_#`<>|~\\!]+$/;
+  const text = addedTokens(before, after)
+    .map(({ t, added }) => (added && /\S/.test(t) && (!markdown || plainWord.test(t)) ? MARK_OPEN + t + MARK_CLOSE : t))
+    .join('');
+  return textHtml(text, markdown).html.split(MARK_OPEN).join('<mark>').split(MARK_CLOSE).join('</mark>');
+}
+
+/** One reviewable piece, in the view chosen. */
+function pvPiece(e, tag = 'div', cls = '') {
+  if (!e) return '';
+  let html;
+  let fallback = false;
+  let lang = state.lang;
+  const now = e.current.trim() ? e.current : '';
+  if (pv.view === 'en') {
+    html = textHtml(e.en, e.markdown).html;
+    lang = 'en';
+  } else {
+    const mine = pv.view === 'mine' ? myText(e) : '';
+    if (mine && mine !== now) html = changedHtml(now, mine, e.markdown);
+    else if (now) html = textHtml(now, e.markdown).html;
+    else {
+      html = textHtml(e.en, e.markdown).html; // the app falls back to English
+      fallback = true;
+      lang = 'en';
+    }
+  }
+  if (!html) return '';
+  const classes = ['pv-piece', cls, fallback ? 'pv-fallback' : '', e.key === pv.key ? 'pv-ring' : ''].filter(Boolean).join(' ');
+  return `<${tag} class="${classes}" data-key="${esc(e.key)}" lang="${esc(lang)}" dir="${lang === 'en' ? 'ltr' : dirFor(lang)}">${html}</${tag}>`;
+}
+
+/** Entries grouped by the block they belong to, in order. */
+function pvBlocks(list) {
+  const blocks = [];
+  for (const e of list) {
+    const id = e.block || e.key;
+    const last = blocks[blocks.length - 1];
+    if (last && last.id === id) last.list.push(e);
+    else blocks.push({ id, type: e.blockType || '', list: [e] });
+  }
+  return blocks;
+}
+
+/** Sub-items of a block (`cards/<id>/…`, `groups/<id>/…`) in order, each a list of its fields. */
+function pvSubItems(list, prefix) {
+  const groups = new Map();
+  for (const e of list) {
+    const m = new RegExp(`^${prefix}/([^/]+)/(.+)$`).exec(e.field || '');
+    if (!m) continue;
+    if (!groups.has(m[1])) groups.set(m[1], []);
+    groups.get(m[1]).push({ ...e, sub: m[2] });
+  }
+  return [...groups.values()];
+}
+
+function pvBlock(block, tint) {
+  const by = (name) => block.list.find((e) => e.field === name);
+  const P = pvPiece;
+  // Colours go in data attributes and are applied from script: the page's CSP forbids inline style attributes.
+  const band = `data-bar="${esc(tint.bar)}" data-band="${esc(tint.band)}"`;
+  switch (block.type) {
+    case 'text':
+      return P(by('markdown'), 'div', 'pv-text');
+    case 'section':
+      return `<div class="pv-band" ${band}>${P(by('title'), 'div', 'pv-band-title')}</div>` +
+        (by('chipLabel') ? `<div class="pv-chiprow">${P(by('chipLabel'), 'span', 'pv-chip')}</div>` : '') +
+        P(by('intro'), 'div', 'pv-text');
+    case 'video':
+      return `<div class="pv-media"><span class="pv-play">${ICONS.play}</span></div>${P(by('caption'), 'div', 'pv-caption')}`;
+    case 'image':
+      return `<div class="pv-media pv-image">${by('alt') ? `<span class="pv-alt-label">Read aloud:</span>${P(by('alt'), 'span', 'pv-alt')}` : ''}</div>${P(by('caption'), 'div', 'pv-caption')}`;
+    case 'pdf':
+      return `<div class="pv-row"><span class="pv-icon">${ICONS.doc}</span>${P(by('label'), 'div', 'pv-link')}</div>`;
+    case 'link':
+      return `<div class="pv-row"><span class="pv-icon">${ICONS.link}</span><div class="pv-row-body">${P(by('label'), 'div', 'pv-link')}${P(by('description'), 'div', 'pv-sub')}${P(by('url'), 'div', 'pv-url')}</div></div>`;
+    case 'phone':
+    case 'email':
+      return `<div class="pv-row"><span class="pv-icon">${block.type === 'phone' ? ICONS.phone : ICONS.mail}</span><div class="pv-row-body">${P(by('label'), 'div', 'pv-link')}${P(by('description'), 'div', 'pv-sub')}</div></div>`;
+    case 'listing': {
+      const sub = (prefix, icon) => pvSubItems(block.list, prefix)
+        .map((fields) => `<div class="pv-row pv-row-tight"><span class="pv-icon">${icon}</span><div class="pv-row-body">${fields.map((f) => P(f, 'div', f.sub === 'url' ? 'pv-url' : 'pv-link')).join('')}</div></div>`)
+        .join('');
+      return `<div class="pv-card">${P(by('name'), 'div', 'pv-card-title')}` +
+        `${by('address') || by('distance') ? `<div class="pv-sub">${P(by('address'), 'span')}${by('address') && by('distance') ? ' · ' : ''}${P(by('distance'), 'span')}</div>` : ''}` +
+        `${P(by('notes'), 'div', 'pv-text pv-small')}${sub('phones', ICONS.phone)}${sub('emails', ICONS.mail)}${sub('links', ICONS.link)}${P(by('details'), 'div', 'pv-text pv-small')}</div>`;
+    }
+    case 'checklist': {
+      const groups = pvSubItems(block.list, 'groups')
+        .map((fields) => fields.map((f) => (f.sub === 'title' ? P(f, 'div', 'pv-check-group') : `<div class="pv-check">${ICONS.box}${P(f, 'span')}</div>`)).join(''))
+        .join('');
+      return `<div class="pv-card">${P(by('title'), 'div', 'pv-card-title')}${P(by('subtitle'), 'div', 'pv-sub')}${groups}</div>`;
+    }
+    case 'hero':
+      return `<div class="pv-hero">${P(by('eyebrow'), 'div', 'pv-eyebrow')}${P(by('headline'), 'div', 'pv-headline')}${P(by('body'), 'div', 'pv-text')}</div>`;
+    case 'callout':
+      return `<div class="pv-callout">${P(by('title'), 'div', 'pv-card-title')}${P(by('body'), 'div', 'pv-text')}</div>`;
+    case 'infoCards': {
+      const cards = pvSubItems(block.list, 'cards')
+        .map((fields) => {
+          const f = (name) => fields.find((x) => x.sub === name);
+          return `<div class="pv-info">${P(f('title'), 'div', 'pv-card-title')}${P(f('subtitle'), 'div', 'pv-sub')}${P(f('body'), 'div', 'pv-text pv-small')}${P(f('meta'), 'div', 'pv-sub')}${P(f('link/label'), 'div', 'pv-link')}</div>`;
+        })
+        .join('');
+      return `${P(by('title'), 'div', 'pv-cards-title')}${cards}`;
+    }
+    case 'subcategory':
+      return `<div class="pv-card pv-subcat"><div class="pv-row-body">${P(by('title'), 'div', 'pv-card-title')}${P(by('description'), 'div', 'pv-sub')}</div><span aria-hidden="true">›</span></div>`;
+    default:
+      return block.list.map((e) => P(e, 'div', 'pv-text')).join('');
+  }
+}
+
+function pvRender() {
+  pv.queued = false;
+  if (!state.snap) return;
+  for (const b of pv.el.querySelectorAll('[data-view]')) b.setAttribute('aria-pressed', String(b.getAttribute('data-view') === pv.view));
+  const item = state.itemById.get(pv.item);
+  if (!item || !PREVIEW_GROUPS.has(item.group)) {
+    pv.screen.innerHTML = `<div class="pv-empty">${esc(item ? 'There’s no phone picture for this part. “Where it appears” under the English says where it is in the app.' : 'Click a piece of text in a resource or a category page to see it here as families do.')}</div>`;
+    pv.note.textContent = '';
+    return;
+  }
+  const tint = item.tint || { bar: '#01828E', band: '#E6EFF6' };
+  const list = state.entries.filter((e) => e.item === item.id);
+  const scrollTop = pv.screen.scrollTop;
+  let html = '';
+  if (item.group === 'resources') {
+    const title = list.find((e) => /\/title$/.test(e.key) && !e.block);
+    const summary = list.find((e) => /\/description$/.test(e.key) && !e.block);
+    if (summary) html += `<div class="pv-listcard"><div class="pv-listcard-label">In a list</div>${pvPiece(title, 'div', 'pv-card-title')}${pvPiece(summary, 'div', 'pv-sub')}</div>`;
+    html += `<div class="pv-sheet"><div class="pv-grabber"></div>${pvPiece(title, 'h3', 'pv-apptitle')}`;
+    html += pvBlocks(list.filter((e) => e.block)).map((b) => pvBlock(b, tint)).join('');
+    html += '</div>';
+  } else {
+    const [unit, cat] = item.id.split('/').slice(1);
+    const name = state.entryByKey.get(`units/${unit}/rcat/${cat}/label`);
+    html += `<div class="pv-sheet pv-page">${name ? pvPiece(name, 'h3', 'pv-apptitle') : `<h3 class="pv-apptitle">${esc(item.title)}</h3>`}`;
+    html += pvBlocks(list).map((b) => pvBlock(b, tint)).join('');
+    html += '</div>';
+  }
+  pv.screen.innerHTML = html;
+  const hex = /^#[0-9a-f]{6}$/i;
+  for (const el of pv.screen.querySelectorAll('.pv-band')) {
+    const bar = el.getAttribute('data-bar');
+    const bg = el.getAttribute('data-band');
+    if (hex.test(bar)) el.style.setProperty('--bar', bar);
+    if (hex.test(bg)) el.style.setProperty('--band', bg);
+  }
+  pv.screen.scrollTop = scrollTop;
+  const ring = pv.screen.querySelector('.pv-ring');
+  if (ring) {
+    const top = ring.offsetTop - pv.screen.offsetTop;
+    if (top < pv.screen.scrollTop || top > pv.screen.scrollTop + pv.screen.clientHeight - 60) pv.screen.scrollTop = Math.max(0, top - 80);
+  }
+  pv.note.textContent = pv.view === 'en'
+    ? 'The English version. Drawn like the app; small details may differ.'
+    : `${pv.view === 'mine' ? 'Yellow = your changes. ' : ''}Grey = no ${state.langName} yet, so the app shows the English. Drawn like the app; small details may differ.`;
+}
+
+function pvSchedule() {
+  if (pv.queued) return;
+  pv.queued = true;
+  requestAnimationFrame(pvRender);
+}
+
+/** Follow the card at the top of the screen while nothing in the list has focus. */
+function pvFollowScroll() {
+  if (ui.list.contains(document.activeElement)) return;
+  const cards = ui.list.querySelectorAll('.card[data-item]');
+  for (const card of cards) {
+    if (card.getBoundingClientRect().bottom > 140) {
+      const id = card.getAttribute('data-item');
+      if (id !== pv.item) { pv.item = id; pv.key = null; pvSchedule(); }
+      return;
+    }
+  }
+}
+
+let pvScrollQueued = false;
+window.addEventListener('scroll', () => {
+  if (pvScrollQueued || !state.unlocked) return;
+  pvScrollQueued = true;
+  requestAnimationFrame(() => { pvScrollQueued = false; pvFollowScroll(); });
+}, { passive: true });
+
+ui.list.addEventListener('focusin', (ev) => {
+  const row = ev.target.closest('.entry');
+  if (!row) return;
+  const e = state.entryByKey.get(row.getAttribute('data-key'));
+  if (!e) return;
+  pv.item = e.item;
+  pv.key = e.key;
+  pvSchedule();
+});
+
+ui.list.addEventListener('input', (ev) => {
+  const row = ev.target.closest?.('.entry');
+  const e = row && state.entryByKey.get(row.getAttribute('data-key'));
+  if (e && e.item === pv.item) pvSchedule();
+});
+
+pv.el.addEventListener('click', (ev) => {
+  const view = ev.target.closest('[data-view]')?.getAttribute('data-view');
+  if (view) { pv.view = view; pvSchedule(); return; }
+  if (ev.target.closest('#pv-close')) { pv.el.classList.remove('is-open'); pv.openBtn.focus(); return; }
+  // A tap on a piece jumps to its row in the list.
+  const key = ev.target.closest('.pv-piece')?.getAttribute('data-key');
+  const row = key && state.rendered.get(key);
+  if (row) {
+    pv.el.classList.remove('is-open');
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    row.querySelector('.box:not(.note-box)')?.focus({ preventScroll: true });
+  }
+});
+
+pv.openBtn.addEventListener('click', () => {
+  commitFocusedBox();
+  pv.el.classList.add('is-open');
+  pvRender();
+  $('#pv-close').focus();
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && pv.el.classList.contains('is-open')) { pv.el.classList.remove('is-open'); pv.openBtn.focus(); }
+});
+
+/** Called when the list is rebuilt or the language changes. */
+function pvReset() {
+  pv.key = null;
+  pv.item = null;
+  pv.openBtn.hidden = false;
+  requestAnimationFrame(() => { pvFollowScroll(); pvSchedule(); });
 }
 
 // Typing in a box and then closing the tab still keeps the text.
