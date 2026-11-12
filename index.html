@@ -13,10 +13,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap">
-<link rel="stylesheet" href="style.css?v=2">
+<link rel="stylesheet" href="style.css?v=3">
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/15.0.12/marked.min.js" integrity="sha512-rCQgmUulW6f6QegOvTntKKb5IAoxTpGVCdWqYjkXEpzAns6XUFs8NKVqWe+KQpctp/EoRSFSuykVputqknLYMg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js" integrity="sha512-YlctBG9PGZIhh9keoqI3eZkQM9T8QUbiBi7qNYAO/TUEo8jqWX5pLp5+x1cKRQDRzJ/lyGyJ9WUVNIRduxIIFw==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-<script type="module" src="app.js?v=3"></script>
+<script type="module" src="app.js?v=4"></script>
 </head>
 <body>
 
@@ -46,7 +46,7 @@
 </div>
 
 <div id="app" hidden>
-  <a class="skip" href="#results">Skip to the text</a>
+  <a class="skip" id="skip-link" href="#results">Skip to the text</a>
   <header class="top">
     <div class="brand">
       <div class="brand-mark" id="lang-mark" aria-hidden="true"></div>
@@ -59,12 +59,15 @@
       <select id="lang-select" class="select"></select>
     </label>
     <div class="top-spacer"></div>
+    <button type="button" id="mode-btn" class="link-btn mode-btn"></button>
     <div class="who">Reviewing as <strong id="who-name"></strong> · <button type="button" id="change-name" class="link-btn">change</button></div>
     <div id="save-state" class="save-state" role="status" aria-live="polite"></div>
     <button type="button" id="lock-btn" class="btn btn-quiet">Lock</button>
   </header>
 
-  <div class="layout">
+  <main id="guided" class="guided" tabindex="-1" aria-label="Guided review" hidden></main>
+
+  <div class="layout" id="layout">
     <nav class="side" aria-label="What to review">
       <h2 class="side-title">What to review</h2>
       <div id="group-nav" class="group-nav"></div>

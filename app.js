@@ -143,6 +143,7 @@ const K = {
   reviewerId: 'tr-reviewer-id',
   lang: 'tr-lang',
   relockMsg: 'tr-relock-message',
+  mode: 'tr-mode',
 };
 
 function reviewerId() {
@@ -452,6 +453,10 @@ const state = {
   cards: new Map(), // item id → card element
   lastRowsFetch: 0,
   rowsError: false,
+  rowsLoaded: false, // the first load of reviewers' rows for this language has come back
+  mode: store.get(localArea, 'tr-mode') === 'table' ? 'table' : 'guided', // 'guided' | 'table'
+  tableBuilt: false,
+  entriesByItem: new Map(),
 };
 
 const OUTCOME_TEXT = {
@@ -484,7 +489,12 @@ function prepareSnapshot(snap) {
   });
   state.entryByKey = new Map(state.entries.map((e) => [e.key, e]));
   state.itemTotals = new Map();
-  for (const e of state.entries) state.itemTotals.set(e.item, (state.itemTotals.get(e.item) || 0) + 1);
+  state.entriesByItem = new Map();
+  for (const e of state.entries) {
+    state.itemTotals.set(e.item, (state.itemTotals.get(e.item) || 0) + 1);
+    if (!state.entriesByItem.has(e.item)) state.entriesByItem.set(e.item, []);
+    state.entriesByItem.get(e.item).push(e);
+  }
 }
 
 /** Rows for the current language: saved ones plus those still in the outbox. */
@@ -585,8 +595,20 @@ function checkText(entry, text) {
   if (entry.markdown && !sameList(linkTargetsIn(entry.en), linkTargetsIn(text))) {
     reasons.push('The links differ from the English. Keep each web address in its ( ) exactly as it is.');
   }
+  if (SUMMARY_KEY.test(entry.key) && text.trim().length > SUMMARY_MAX) {
+    reasons.push(`Too long for the app's cards: ${text.trim().length} characters, ${SUMMARY_MAX} at most.`);
+  }
   return reasons;
 }
+
+/** A resource's summary must fit the app's cards. */
+const SUMMARY_KEY = /^res\/[^/]+\/description$/;
+const SUMMARY_MAX = 150;
+
+/** An AI draft is shown only where there's no translation yet. */
+const draftOf = (e) => (!e.current.trim() && e.aiDraft ? e.aiDraft.trim() : '');
+/** A saved suggestion that is the AI draft word for word. */
+const approvesDraft = (e, row) => !!row && row.verdict === 'suggest' && !!draftOf(e) && (row.suggested || '').trim() === draftOf(e);
 
 // ---------------------------------------------------------------------------
 // Text rendering
@@ -647,6 +669,10 @@ const ui = {
   banner: $('#banner'),
   langSelect: $('#lang-select'),
   dialog: $('#welcome'),
+  layout: $('#layout'),
+  guided: $('#guided'),
+  modeBtn: $('#mode-btn'),
+  skipLink: $('#skip-link'),
 };
 
 function showUnlock(message) {
@@ -817,7 +843,8 @@ function setLanguage(choice, snap) {
   const L = state.langName;
   $('#how-text').textContent =
     `Read the English and the ${L} the app shows now. If the ${L} is right, click “Looks good”. ` +
-    `If not, type a better version — it saves when you click away from the box. Where there's no ${L} yet, write it. ` +
+    `If not, type a better version — it saves when you click away from the box. Where there's no ${L} yet, ` +
+    'check the AI draft and click “Use this draft”, then change what needs changing. ' +
     'Everything saves as you go, and other reviewers see your work.';
   ui.search.placeholder = `Search English or ${L}`;
   $('#style-note').textContent = snap.styleNote || '';
@@ -825,12 +852,16 @@ function setLanguage(choice, snap) {
   state.group = null;
   state.search = '';
   ui.search.value = '';
-  rebuildList();
+  state.rowsLoaded = false;
+  Object.assign(guided, { step: 'start', itemId: null, index: 0, editing: false, picking: false, pickQuery: '' });
+  state.tableBuilt = false;
+  setMode(state.mode);
   loadRows();
 }
 
 ui.langSelect.addEventListener('change', async () => {
   commitFocusedBox();
+  commitGuided();
   const choice = state.index.languages.find((l) => l.lang === ui.langSelect.value);
   if (!choice || choice.lang === state.lang) return;
   ui.list.innerHTML = '<p class="results">Loading…</p>';
@@ -853,11 +884,13 @@ async function loadRows() {
     if (lang !== state.lang) return;
     state.serverRows = rows;
     state.rowsError = false;
+    state.rowsLoaded = true;
     // Rows we just sent may not be in this reply yet if it was already on its way.
     refreshDerived(null);
   } catch (err) {
     if (err instanceof AuthRejected) { onAuthError(err); return; }
     state.rowsError = true;
+    guidedPatch();
   }
   renderBanner();
 }
@@ -885,6 +918,7 @@ function refreshDerived(keys) {
   renderFilters();
   renderGroups();
   renderSaveState();
+  guidedPatch();
   pvSchedule();
 }
 
@@ -894,7 +928,7 @@ const FILTERS = [
   { id: 'flagged', label: () => 'Check these first', test: (e) => e.flags.length > 0 },
   { id: 'unchecked', label: () => 'Not checked yet', test: (e) => infoOf(e.key).status === 'none' },
   { id: 'suggested', label: () => 'Has a suggestion', test: (e) => infoOf(e.key).status === 'suggest' },
-  { id: 'missing', label: () => `Needs ${state.langName}`, test: (e) => !e.current.trim() },
+  { id: 'missing', label: () => `No ${state.langName} yet`, test: (e) => !e.current.trim() },
   { id: 'all', label: () => 'All', test: () => true },
 ];
 
@@ -1098,7 +1132,11 @@ function buildEntry(e, i) {
         <div class="col-label">${esc(L)} now</div>
         ${now
           ? `<div class="text${now.plain ? ' plain' : ''}" lang="${esc(lang)}" dir="${dir}">${now.html}</div>`
-          : `<div class="empty-now">No ${esc(L)} yet</div>`}
+          : draftOf(e)
+            ? `<div class="ai-draft"><span class="badge badge-draft">AI draft · please check closely</span>
+                <div class="text${textHtml(draftOf(e), e.markdown).plain ? ' plain' : ''}" lang="${esc(lang)}" dir="${dir}">${textHtml(draftOf(e), e.markdown).html}</div>
+                <button type="button" class="text-btn draft-btn">Use this draft</button></div>`
+            : `<div class="empty-now">No ${esc(L)} yet</div>`}
       </div>
       <div class="col col-box">
         <label class="col-label desk-hidden" for="${id}-box">Your ${esc(L)}</label>
@@ -1139,7 +1177,7 @@ function patchEntry(row, e) {
   status.className = `status s-${info.status}`;
   if (info.status === 'none') status.textContent = 'Not checked yet';
   else {
-    const label = info.status === 'ok' ? 'Looks good' : 'Suggestion saved';
+    const label = info.status === 'ok' ? 'Looks good' : approvesDraft(e, info.by) ? 'AI draft approved' : 'Suggestion saved';
     const more = info.reviewers > 1 ? ` and ${info.reviewers - 1} more` : '';
     status.textContent = `${label} · ${info.by.reviewer || 'Someone'}, ${shortDate(info.by.client_at)}${more}`;
   }
@@ -1358,6 +1396,13 @@ ui.list.addEventListener('click', (ev) => {
       box.focus();
       hint.textContent = 'Change it if you like. It saves when you click away from the box.';
     }
+  } else if (btn.classList.contains('draft-btn')) {
+    box.value = draftOf(e);
+    box.classList.add('has-text');
+    grow(box);
+    renderWarnings(row, e);
+    box.focus();
+    hint.textContent = 'Change what needs changing. It saves when you click away from the box.';
   } else if (btn.classList.contains('retry-btn')) {
     const list = outbox.read().map((o) => (o.row.entry_key === e.key && o.failed ? { row: o.row } : o));
     outbox.write(list);
@@ -1431,6 +1476,7 @@ $('#welcome-form').addEventListener('submit', (ev) => {
     renderWho();
   }
   ui.dialog.close();
+  guidedRender();
 });
 
 $('#welcome-cancel').addEventListener('click', () => ui.dialog.close());
@@ -1447,6 +1493,7 @@ $('#style-link-side').addEventListener('click', () => openDialog('note'));
 
 $('#lock-btn').addEventListener('click', () => {
   commitFocusedBox();
+  commitGuided();
   clearSession();
   location.reload();
 });
@@ -1500,7 +1547,9 @@ const ICONS = {
 
 /** The reviewer's own text for a piece: what's in their box now, else their saved suggestion. */
 function myText(e) {
-  const box = state.rendered.get(e.key)?.querySelector('.box:not(.note-box)');
+  const box = state.mode === 'guided'
+    ? (guided.editing && pv.key === e.key ? ui.guided.querySelector('.g-box') : null)
+    : state.rendered.get(e.key)?.querySelector('.box:not(.note-box)');
   const typed = box?.value.trim();
   if (typed) return typed;
   const mine = infoOf(e.key).mine;
@@ -1545,23 +1594,28 @@ function pvPiece(e, tag = 'div', cls = '') {
   if (!e) return '';
   let html;
   let fallback = false;
+  let isDraft = false;
   let lang = state.lang;
   const now = e.current.trim() ? e.current : '';
+  // "With my changes" shows AI drafts (dashed) where there's no translation; "Now" shows what the app shows today.
+  const base = now || (pv.view === 'mine' ? draftOf(e) : '');
   if (pv.view === 'en') {
     html = textHtml(e.en, e.markdown).html;
     lang = 'en';
   } else {
     const mine = pv.view === 'mine' ? myText(e) : '';
-    if (mine && mine !== now) html = changedHtml(now, mine, e.markdown);
-    else if (now) html = textHtml(now, e.markdown).html;
-    else {
+    if (mine && mine !== base) html = changedHtml(base, mine, e.markdown);
+    else if (base) {
+      html = textHtml(base, e.markdown).html;
+      isDraft = !now;
+    } else {
       html = textHtml(e.en, e.markdown).html; // the app falls back to English
       fallback = true;
       lang = 'en';
     }
   }
   if (!html) return '';
-  const classes = ['pv-piece', cls, fallback ? 'pv-fallback' : '', e.key === pv.key ? 'pv-ring' : ''].filter(Boolean).join(' ');
+  const classes = ['pv-piece', cls, fallback ? 'pv-fallback' : '', isDraft ? 'pv-draft' : '', e.key === pv.key ? 'pv-ring' : ''].filter(Boolean).join(' ');
   return `<${tag} class="${classes}" data-key="${esc(e.key)}" lang="${esc(lang)}" dir="${lang === 'en' ? 'ltr' : dirFor(lang)}">${html}</${tag}>`;
 }
 
@@ -1649,7 +1703,8 @@ function pvBlock(block, tint) {
 function pvRender() {
   pv.queued = false;
   if (!state.snap) return;
-  for (const b of pv.el.querySelectorAll('[data-view]')) b.setAttribute('aria-pressed', String(b.getAttribute('data-view') === pv.view));
+  for (const b of document.querySelectorAll('[data-view]')) b.setAttribute('aria-pressed', String(b.getAttribute('data-view') === pv.view));
+  if (!pv.screen.isConnected) return;
   const item = state.itemById.get(pv.item);
   if (!item || !PREVIEW_GROUPS.has(item.group)) {
     pv.screen.innerHTML = `<div class="pv-empty">${esc(item ? 'There’s no phone picture for this part. “Where it appears” under the English says where it is in the app.' : 'Click a piece of text in a resource or a category page to see it here as families do.')}</div>`;
@@ -1690,7 +1745,7 @@ function pvRender() {
   }
   pv.note.textContent = pv.view === 'en'
     ? 'The English version. Drawn like the app; small details may differ.'
-    : `${pv.view === 'mine' ? 'Yellow = your changes. ' : ''}Grey = no ${state.langName} yet, so the app shows the English. Drawn like the app; small details may differ.`;
+    : `${pv.view === 'mine' ? 'Yellow = your changes. Dashed = AI draft, not yet checked. ' : ''}Grey = no ${state.langName} yet, so the app shows the English. Drawn like the app; small details may differ.`;
 }
 
 function pvSchedule() {
@@ -1701,7 +1756,7 @@ function pvSchedule() {
 
 /** Follow the card at the top of the screen while nothing in the list has focus. */
 function pvFollowScroll() {
-  if (ui.list.contains(document.activeElement)) return;
+  if (state.mode !== 'table' || ui.list.contains(document.activeElement)) return;
   const cards = ui.list.querySelectorAll('.card[data-item]');
   for (const card of cards) {
     if (card.getBoundingClientRect().bottom > 140) {
@@ -1762,6 +1817,9 @@ document.addEventListener('keydown', (ev) => {
 
 /** Called when the list is rebuilt or the language changes. */
 function pvReset() {
+  if (state.mode !== 'table') return;
+  pv.screen = $('#pv-screen');
+  pv.note = $('#pv-note');
   pv.key = null;
   pv.item = null;
   pv.openBtn.hidden = false;
@@ -1769,7 +1827,568 @@ function pvReset() {
 }
 
 // Typing in a box and then closing the tab still keeps the text.
-document.addEventListener('visibilitychange', () => { if (document.hidden) commitFocusedBox(); });
-window.addEventListener('pagehide', commitFocusedBox);
+document.addEventListener('visibilitychange', () => { if (document.hidden) { commitFocusedBox(); commitGuided(); } });
+window.addEventListener('pagehide', () => { commitFocusedBox(); commitGuided(); });
+
+// ---------------------------------------------------------------------------
+// Guided review: one resource (or part of the app) at a time — start screen,
+// read it through, each piece in turn, done. The table ("Show me
+// everything") stays for anyone who wants it all at once.
+// ---------------------------------------------------------------------------
+
+/** Resources first (most of the work, easiest with the phone picture), app buttons near the end. */
+const GUIDED_GROUPS = ['resources', 'category_pages', 'essentials', 'tour', 'phase_cards', 'names', 'app', 'feedback'];
+/** Someone else saved to an item this recently: they're probably still on it. */
+const RECENT_MS = 2 * 60 * 60 * 1000;
+
+const guided = { step: 'start', itemId: null, index: 0, editing: false, picking: false, pickQuery: '' };
+let guidedHtml = '';
+
+// Pieces this reviewer chose to skip stay "not checked" for everyone else, but aren't offered to them again.
+const skippedKey = () => `tr-skipped:${ENV}:${state.lang}`;
+function skippedSet() {
+  const v = store.get(localArea, skippedKey());
+  return new Set(Array.isArray(v) ? v : []);
+}
+function setSkipped(key, on) {
+  const s = skippedSet();
+  if (on === s.has(key)) return;
+  if (on) s.add(key);
+  else s.delete(key);
+  store.set(localArea, skippedKey(), [...s]);
+}
+
+function setMode(mode) {
+  commitFocusedBox();
+  commitGuided();
+  state.mode = mode;
+  store.set(localArea, K.mode, mode);
+  const isGuided = mode === 'guided';
+  ui.guided.hidden = !isGuided;
+  ui.layout.hidden = isGuided;
+  ui.modeBtn.textContent = isGuided ? 'Show me everything' : 'Back to guided review';
+  ui.skipLink.setAttribute('href', isGuided ? '#guided' : '#results');
+  if (isGuided) {
+    pv.el.classList.remove('is-open');
+    pv.openBtn.hidden = true;
+    guidedHtml = '';
+    guidedRender();
+  } else if (!state.tableBuilt) {
+    state.tableBuilt = true;
+    rebuildList();
+  } else {
+    pvReset();
+  }
+}
+
+ui.modeBtn.addEventListener('click', () => {
+  setMode(state.mode === 'guided' ? 'table' : 'guided');
+  (state.mode === 'guided' ? ui.guided : ui.results).focus();
+});
+
+function guidedItems() {
+  const rank = (item) => {
+    const r = GUIDED_GROUPS.indexOf(item.group);
+    return r === -1 ? GUIDED_GROUPS.length : r;
+  };
+  return state.snap.items
+    .map((item, order) => ({ item, order }))
+    .sort((a, b) => rank(a.item) - rank(b.item) || a.order - b.order)
+    .map((x) => x.item);
+}
+
+function itemProgress(itemId) {
+  const list = state.entriesByItem.get(itemId) || [];
+  const skipped = skippedSet();
+  const now = Date.now();
+  const p = { total: list.length, open: 0, openForMe: 0, touched: false, mine: false, recentOther: false, drafts: 0 };
+  for (const e of list) {
+    const info = infoOf(e.key);
+    if (draftOf(e)) p.drafts++;
+    if (info.status === 'none') {
+      p.open++;
+      if (!skipped.has(e.key)) p.openForMe++;
+    } else p.touched = true;
+    if (info.mine) p.mine = true;
+    if (info.others.some((r) => now - timeOf(r.created_at || r.client_at) < RECENT_MS)) p.recentOther = true;
+  }
+  return p;
+}
+
+/**
+ * The next item for this reviewer: one they started themselves, else one
+ * nobody has touched, else one others left partly done, else (only when
+ * nothing else is left) one someone else is working on now. A random pick
+ * among the first three, so two people starting together rarely collide.
+ */
+function pickNext(exclude) {
+  const tiers = [[], [], [], []];
+  for (const item of guidedItems()) {
+    if (item.id === exclude) continue;
+    const p = itemProgress(item.id);
+    if (p.openForMe === 0) continue;
+    tiers[p.mine ? 0 : p.recentOther ? 3 : p.touched ? 2 : 1].push(item.id);
+  }
+  const tier = tiers.find((t) => t.length) || [];
+  if (tier === tiers[0]) return tier[0] || null;
+  const first = tier.slice(0, 3);
+  return first.length ? first[Math.floor(Math.random() * first.length)] : null;
+}
+
+const itemNoun = (item) => (item.group === 'resources' ? 'resource' : item.group === 'category_pages' ? 'category page' : 'part of the app');
+const hasPhone = (item) => PREVIEW_GROUPS.has(item.group);
+const firstOpenIndex = (list) => {
+  const skipped = skippedSet();
+  const i = list.findIndex((e) => infoOf(e.key).status === 'none' && !skipped.has(e.key));
+  return i === -1 ? 0 : i;
+};
+
+function stepsHtml(n) {
+  const s = (i, label) => `<span class="g-step${n === i ? ' is-on' : ''}"${n === i ? ' aria-current="step"' : ''}>${i} · ${label}</span>`;
+  return `<div class="g-steps">${s(1, 'Read it through')}<span class="g-arrow" aria-hidden="true">→</span>${s(2, 'Check each piece')}</div>`;
+}
+
+function phoneColHtml() {
+  return `<div class="g-phone-col">
+    <div class="pv-views" role="group" aria-label="Which text to show">
+      <button type="button" data-view="now" aria-pressed="false">Now</button>
+      <button type="button" data-view="mine" aria-pressed="true">With my changes</button>
+      <button type="button" data-view="en" aria-pressed="false">English</button>
+    </div>
+    <div class="pv-phone"><div id="g-screen" class="pv-screen"></div></div>
+    <p id="g-note" class="pv-note"></p>
+  </div>`;
+}
+
+function startHtml() {
+  const name = myName();
+  const L = state.langName;
+  const item = state.itemById.get(guided.itemId);
+  const checkedByMe = state.entries.filter((e) => infoOf(e.key).mine).length;
+  let card;
+  if (!item) {
+    card = `<section class="g-card"><h2 class="g-card-title">Everything has been checked</h2>
+      <p>Thank you! There's nothing left to check right now. You can still look through all the text.</p>
+      <button type="button" class="btn btn-primary g-big" data-g="table">Show me everything</button></section>`;
+  } else {
+    const p = itemProgress(item.id);
+    const kicker = item.group === 'resources' ? 'Your next resource' : `Next: ${state.groupLabel.get(item.group) || ''}`;
+    const sub = [item.group === 'resources' ? item.subtitle : state.groupLabel.get(item.group), `${p.total} short ${p.total === 1 ? 'piece' : 'pieces'}`]
+      .filter(Boolean).join(' · ');
+    card = `<section class="g-card">
+      <div class="g-kicker">${esc(kicker)}</div>
+      <div class="g-title-row"><span class="g-bar"${item.tint ? ` data-bar="${esc(item.tint.bar)}"` : ''}></span>
+        <div><h2 class="g-card-title">${esc(item.title)}</h2><div class="g-sub">${esc(sub)}</div></div></div>
+      ${p.touched && p.open < p.total ? `<p class="g-meta">${p.mine ? 'You started this one' : 'Someone started this one'}: ${p.openForMe} of ${p.total} pieces still to check.</p>` : ''}
+      ${p.drafts ? `<p class="g-draftnote">${p.drafts} ${p.drafts === 1 ? 'piece is an' : 'pieces are'} <strong>AI ${p.drafts === 1 ? 'draft' : 'drafts'}</strong>: a computer wrote ${p.drafts === 1 ? 'it' : 'them'} and no person has checked ${p.drafts === 1 ? 'it' : 'them'} yet. They have a dashed outline. Please read those closely.</p>` : ''}
+      <button type="button" class="btn btn-primary g-big" data-g="start">Start</button>
+    </section>`;
+  }
+  return `<div class="g-wrap g-narrow">
+    <h1 class="g-hello" tabindex="-1">${name ? `Hello, ${esc(name)}` : 'Welcome'}</h1>
+    <p class="g-lead">Thank you for helping families read the app in ${esc(L)}. We'll go one ${item ? esc(itemNoun(item)) : 'resource'} at a time. Stop whenever you like; your work is saved as you go.</p>
+    ${card}
+    <div class="g-links">
+      <span>${checkedByMe ? `You've checked ${checkedByMe} ${checkedByMe === 1 ? 'piece' : 'pieces'} so far.` : 'Nothing checked yet.'}</span>
+      <button type="button" class="link-btn" data-g="style">How to write for families</button>
+      <button type="button" class="link-btn" data-g="pick" aria-expanded="${guided.picking}">Pick a different one</button>
+      <button type="button" class="link-btn" data-g="table">Show me everything</button>
+    </div>
+    ${guided.picking ? pickHtml() : ''}
+  </div>`;
+}
+
+function pickListItems() {
+  const q = fold(guided.pickQuery.trim());
+  return guidedItems()
+    .filter((i) => i.id !== guided.itemId && (!q || fold(i.title).includes(q)))
+    .map((i) => ({ i, p: itemProgress(i.id) }))
+    .filter(({ p }) => p.open > 0)
+    .slice(0, 40)
+    .map(({ i, p }) => `<li><button type="button" class="g-pick-item" data-g="pick-item" data-item="${esc(i.id)}">
+      <span>${esc(i.title)}</span><span class="g-pick-meta">${esc(state.groupLabel.get(i.group) || '')} · ${p.open} to check</span></button></li>`)
+    .join('') || '<li class="g-pick-none">Nothing matches.</li>';
+}
+
+function pickHtml() {
+  return `<section class="g-pick" aria-label="Pick a different one">
+    <label class="search"><span class="sr-only">Find a resource or part of the app</span>
+      <input class="g-pick-search" type="search" autocomplete="off" placeholder="Find a resource or part of the app" value="${esc(guided.pickQuery)}"></label>
+    <ul class="g-pick-list">${pickListItems()}</ul>
+  </section>`;
+}
+
+function readHtml(item, list) {
+  const L = state.langName;
+  const lang = state.lang;
+  const dir = dirFor(lang);
+  const drafts = list.filter((e) => draftOf(e)).length;
+  const body = hasPhone(item)
+    ? `<p>This is how it looks in the app, in ${esc(L)}. Read it through once. Does it sound natural? Is anything confusing?</p>`
+    : `<p>These are the words families see in this part of the app. Read them through once. Do they sound natural? Is anything confusing?</p>`;
+  const reading = hasPhone(item) ? '' : `<div class="g-reading">${list.map((e) => {
+    const text = e.current.trim() || draftOf(e);
+    const html = text ? textHtml(text, e.markdown) : null;
+    return `<div class="g-readrow">
+      <div class="g-readkind">${esc(e.kind)}${e.where ? ` · ${esc(e.where)}` : ''}</div>
+      ${html ? `<div class="text${html.plain ? ' plain' : ''}${e.current.trim() ? '' : ' g-is-draft'}" lang="${esc(lang)}" dir="${dir}">${html.html}</div>` : `<div class="empty-now">No ${esc(L)} yet</div>`}
+      <div class="g-readen" lang="en">English: ${esc(e.en)}</div>
+    </div>`;
+  }).join('')}</div>`;
+  return `<div class="g-wrap">
+    ${stepsHtml(1)}
+    <div class="g-split">
+      <div class="g-main">
+        <div class="g-kicker">${esc(item.title)}</div>
+        <h1 class="g-h1" tabindex="-1">Read it the way a family would</h1>
+        ${body}
+        ${drafts ? `<p>Pieces with a <span class="g-dashed">dashed outline</span> are AI drafts that nobody has checked yet.</p>` : ''}
+        <p>You don't need to fix anything here; next you'll go through it piece by piece.</p>
+        ${reading}
+        <div class="g-actions">
+          <button type="button" class="btn btn-primary g-big" data-g="read-next">Next: check each piece →</button>
+          <button type="button" class="link-btn" data-g="back">Back</button>
+        </div>
+      </div>
+      ${hasPhone(item) ? phoneColHtml() : ''}
+    </div>
+  </div>`;
+}
+
+function pieceHtml(item, list) {
+  const e = list[guided.index];
+  const L = state.langName;
+  const lang = state.lang;
+  const dir = dirFor(lang);
+  const info = infoOf(e.key);
+  const en = textHtml(e.en, e.markdown);
+  const now = e.current.trim() ? textHtml(e.current, e.markdown) : null;
+  const draft = draftOf(e);
+  const draftHtml = draft ? textHtml(draft, e.markdown) : null;
+  const editing = guided.editing || (!now && !draft);
+  const mine = info.mine;
+  const prefill = mine?.verdict === 'suggest' && !approvesDraft(e, mine) ? mine.suggested || '' : draft || e.current;
+  const isSummary = SUMMARY_KEY.test(e.key);
+  return `<div class="g-wrap">
+    ${stepsHtml(2)}
+    <div class="g-progress"><progress max="${list.length}" value="${guided.index + 1}"></progress><span>Piece ${guided.index + 1} of ${list.length}</span></div>
+    <div class="g-split">
+      <div class="g-main">
+        <section class="g-piece">
+          <div class="g-piece-head"><span class="chip">${esc(e.kind)}</span>${hasPhone(item) ? '<span class="g-ringed">ringed on the phone</span>' : ''}</div>
+          ${e.where ? `<p class="where">Where it appears: ${esc(e.where)}</p>` : ''}
+          ${e.flags.length ? `<ul class="flags">${e.flags.map((f) => `<li>Check this first: ${esc(f)}</li>`).join('')}</ul>` : ''}
+          <div class="g-block">
+            <div class="col-label">English</div>
+            <div class="text g-big-text${en.plain ? ' plain' : ''}" lang="en">${en.html}</div>
+          </div>
+          <div class="g-block">
+            <div class="g-label-row"><span class="col-label">${esc(L)}</span>${!now && draft ? '<span class="badge badge-draft">AI draft · please check closely</span>' : ''}</div>
+            ${now
+              ? `<div class="text g-big-text${now.plain ? ' plain' : ''}" lang="${esc(lang)}" dir="${dir}">${now.html}</div>`
+              : draftHtml
+                ? `<div class="text g-big-text g-is-draft${draftHtml.plain ? ' plain' : ''}" lang="${esc(lang)}" dir="${dir}">${draftHtml.html}</div>`
+                : `<div class="empty-now">No ${esc(L)} yet. Please write it below.</div>`}
+          </div>
+          <p class="g-status" aria-live="polite"></p>
+          ${editing ? `<div class="g-edit">
+            <label class="field-label" for="g-box">${now || draft ? 'Your version' : `Your ${esc(L)}`}</label>
+            <textarea id="g-box" class="box g-box has-text" rows="3" maxlength="20000" lang="${esc(lang)}" dir="${dir}" spellcheck="true">${esc(prefill)}</textarea>
+            ${isSummary ? '<p class="g-counter" aria-live="polite"></p>' : ''}
+            <ul class="warns" aria-live="polite"></ul>
+          </div>` : ''}
+          <label class="sr-only" for="g-note">Note for Mark (optional)</label>
+          <input id="g-note" class="input g-note" maxlength="2000" placeholder="Note for Mark (optional)" value="${esc(mine?.note || '')}">
+          <p class="g-hint" aria-live="polite"></p>
+          <div class="g-actions">
+            ${editing
+              ? `<button type="button" class="btn btn-primary g-big" data-g="save">Save my version and go on</button>
+                 ${now || draft ? '<button type="button" class="btn" data-g="cancel">Cancel</button>' : ''}`
+              : `<button type="button" class="btn btn-primary g-big" data-g="ok">Looks right</button>
+                 <button type="button" class="btn g-big" data-g="edit">Suggest a change</button>`}
+            <span class="g-spacer"></span>
+            <button type="button" class="link-btn" data-g="prev">← Previous</button>
+            <button type="button" class="link-btn" data-g="skip">Skip for now</button>
+          </div>
+        </section>
+      </div>
+      ${hasPhone(item) ? phoneColHtml() : ''}
+    </div>
+  </div>`;
+}
+
+function doneHtml(item, list) {
+  const name = myName();
+  let right = 0;
+  let changes = 0;
+  let skipped = 0;
+  const skippedKeys = skippedSet();
+  for (const e of list) {
+    const mine = infoOf(e.key).mine;
+    if (mine?.verdict === 'ok' || approvesDraft(e, mine)) right++;
+    else if (mine?.verdict === 'suggest') changes++;
+    else if (skippedKeys.has(e.key)) skipped++;
+  }
+  const parts = [];
+  if (right) parts.push(`${right} looked right`);
+  if (changes) parts.push(`your ${changes === 1 ? 'change is' : `${changes} changes are`} on the way to Mark`);
+  if (skipped) parts.push(`${skipped} skipped for now`);
+  const next = pickNext(item.id);
+  return `<div class="g-wrap g-narrow g-center">
+    <div class="g-tick" aria-hidden="true">✓</div>
+    <h1 class="g-hello" tabindex="-1">Done. Thank you${name ? `, ${esc(name)}` : ''}.</h1>
+    <p class="g-lead">You went through all ${list.length} ${list.length === 1 ? 'piece' : 'pieces'} of <strong>${esc(item.title)}</strong>.${parts.length ? ` ${esc(parts.join(', ').replace(/^./, (c) => c.toUpperCase()))}.` : ''}</p>
+    <div class="g-actions g-center-row">
+      ${next ? '<button type="button" class="btn btn-primary g-big" data-g="next-item">Next one</button>' : ''}
+      <button type="button" class="btn g-big" data-g="stop">Stop for today</button>
+    </div>
+    ${next ? '' : '<p class="g-meta">That was the last one for now. Thank you!</p>'}
+  </div>`;
+}
+
+function stoppedHtml() {
+  return `<div class="g-wrap g-narrow g-center">
+    <h1 class="g-hello" tabindex="-1">Thank you</h1>
+    <p class="g-lead">Everything is saved. You can close this page. When you come back, we'll pick up where you left off.</p>
+    <div class="g-actions g-center-row"><button type="button" class="btn btn-primary g-big" data-g="keep-going">Keep going</button></div>
+  </div>`;
+}
+
+function guidedRender() {
+  if (state.mode !== 'guided' || !state.snap) return;
+  let html;
+  if (!state.rowsLoaded && !state.rowsError) {
+    html = '<div class="g-wrap g-narrow"><p class="g-lead">Loading…</p></div>';
+  } else {
+    if (guided.step === 'start' && (!guided.itemId || itemProgress(guided.itemId).openForMe === 0)) guided.itemId = pickNext(null);
+    const item = state.itemById.get(guided.itemId);
+    const list = item ? state.entriesByItem.get(item.id) || [] : [];
+    if (!item && guided.step !== 'stopped') guided.step = 'start';
+    guided.index = Math.min(Math.max(0, guided.index), Math.max(0, list.length - 1));
+    html = guided.step === 'read' ? readHtml(item, list)
+      : guided.step === 'piece' ? pieceHtml(item, list)
+      : guided.step === 'done' ? doneHtml(item, list)
+      : guided.step === 'stopped' ? stoppedHtml()
+      : startHtml();
+    if (state.rowsError) html = `<div class="banner g-banner" role="status">Can't reach the server just now, so other reviewers' work may be missing. Your changes are kept on this computer and will be saved.</div>${html}`;
+  }
+  // Re-draw only when something changed, so focus and scroll stay where they are.
+  if (html !== guidedHtml) {
+    const focused = document.activeElement?.closest?.('[data-g]')?.getAttribute('data-g');
+    guidedHtml = html;
+    ui.guided.innerHTML = html;
+    for (const el of ui.guided.querySelectorAll('.g-bar[data-bar]')) {
+      const bar = el.getAttribute('data-bar');
+      if (/^#[0-9a-f]{6}$/i.test(bar)) el.style.setProperty('--bar', bar);
+    }
+    const box = ui.guided.querySelector('.g-box');
+    if (box) { grow(box); guidedWarnings(); }
+    if (focused) ui.guided.querySelector(`[data-g="${focused}"]`)?.focus({ preventScroll: true });
+    if (ui.guided.querySelector('#g-screen')) {
+      pv.screen = $('#g-screen');
+      pv.note = $('#g-note');
+    }
+  }
+  pv.item = guided.itemId;
+  pv.key = guided.step === 'piece' ? (state.entriesByItem.get(guided.itemId) || [])[guided.index]?.key ?? null : null;
+  guidedStatus();
+  if (ui.guided.querySelector('#g-screen')) pvRender();
+}
+
+/** Status lines that change with saving; kept out of the re-draw check. */
+function guidedStatus() {
+  const el = ui.guided.querySelector('.g-status');
+  if (!el || guided.step !== 'piece') return;
+  const e = (state.entriesByItem.get(guided.itemId) || [])[guided.index];
+  if (!e) return;
+  const info = infoOf(e.key);
+  const mine = info.mine;
+  let text = '';
+  if (mine) {
+    text = mine.verdict === 'ok' ? 'You said this looks right.' : approvesDraft(e, mine) ? 'You approved the AI draft.' : 'You suggested a change.';
+    if (info.pending) text += flushing && !lastSendFailed ? ' Saving…' : ' Not saved yet — will retry.';
+  } else if (info.by) {
+    text = `Checked by ${info.by.reviewer || 'someone'}${info.by.verdict === 'suggest' ? ', who suggested a change' : ''}.`;
+  }
+  el.textContent = text;
+}
+
+function guidedPatch() {
+  if (state.mode !== 'guided') return;
+  const a = document.activeElement;
+  const typing = a && ui.guided.contains(a) && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT');
+  if (guided.editing || typing) { guidedStatus(); return; }
+  guidedRender();
+}
+
+function guidedWarnings() {
+  const e = (state.entriesByItem.get(guided.itemId) || [])[guided.index];
+  const box = ui.guided.querySelector('.g-box');
+  if (!e || !box) return;
+  ui.guided.querySelector('.warns').innerHTML = checkText(e, box.value).map((w) => `<li>${esc(w)}</li>`).join('');
+  const counter = ui.guided.querySelector('.g-counter');
+  if (counter) counter.textContent = `${box.value.trim().length} of ${SUMMARY_MAX} characters`;
+}
+
+const currentPiece = () => (guided.step === 'piece' ? (state.entriesByItem.get(guided.itemId) || [])[guided.index] : null);
+const noteValue = () => (ui.guided.querySelector('.g-note')?.value || '').trim();
+const guidedHint = (text) => { const h = ui.guided.querySelector('.g-hint'); if (h) h.textContent = text; };
+
+/** "Looks right": the current text, or the AI draft where there's none. */
+function lookRight(e) {
+  const note = noteValue();
+  const mine = infoOf(e.key).mine;
+  if (e.current.trim()) {
+    if (!(mine?.verdict === 'ok' && (mine.note || '') === note) && !save(e, 'ok', null, note)) return false;
+  } else if (draftOf(e)) {
+    // Approving a draft is a suggestion of its text: an "ok" would leave Mark nothing to accept.
+    if (!(approvesDraft(e, mine) && (mine.note || '') === note) && !save(e, 'suggest', draftOf(e), note)) return false;
+  } else return false;
+  setSkipped(e.key, false);
+  return true;
+}
+
+/** Saves what's in the box; false when there's nothing to save. */
+function saveTyped(e) {
+  const box = ui.guided.querySelector('.g-box');
+  const text = (box?.value || '').trim();
+  const note = noteValue();
+  if (!text) { guidedHint('Type your version, or click “Skip for now”.'); return false; }
+  if ((e.current.trim() && text === e.current.trim()) || (!e.current.trim() && text === draftOf(e))) return lookRight(e);
+  const mine = infoOf(e.key).mine;
+  if (!(mine?.verdict === 'suggest' && (mine.suggested || '').trim() === text && (mine.note || '') === note) && !save(e, 'suggest', text, note)) return false;
+  setSkipped(e.key, false);
+  return true;
+}
+
+/** Leaving a piece with a changed box keeps the change (going back, skipping, closing the tab). */
+function commitGuided() {
+  if (state.mode !== 'guided' || !guided.editing) return;
+  const e = currentPiece();
+  const box = ui.guided.querySelector('.g-box');
+  if (!e || !box) return;
+  const text = box.value.trim();
+  const mine = infoOf(e.key).mine;
+  const saved = mine?.verdict === 'suggest' ? (mine.suggested || '').trim() : '';
+  if (!text || text === saved || text === e.current.trim() || text === draftOf(e)) return;
+  if (save(e, 'suggest', text, noteValue())) setSkipped(e.key, false);
+}
+
+function goTo(step, extra = {}) {
+  Object.assign(guided, { editing: false, ...extra, step });
+  guidedRender();
+  window.scrollTo({ top: 0 });
+  const target = ui.guided.querySelector('.g-hello, .g-h1') || (step === 'piece' ? ui.guided.querySelector('.g-big') : null);
+  target?.focus({ preventScroll: true });
+}
+
+function advance() {
+  const list = state.entriesByItem.get(guided.itemId) || [];
+  if (guided.index + 1 >= list.length) goTo('done');
+  else goTo('piece', { index: guided.index + 1 });
+}
+
+ui.guided.addEventListener('click', (ev) => {
+  const view = ev.target.closest('[data-view]')?.getAttribute('data-view');
+  if (view) { pv.view = view; pvSchedule(); return; }
+  // A tap on a piece in the phone goes to that piece.
+  const tapped = ev.target.closest('.pv-piece')?.getAttribute('data-key');
+  if (tapped) {
+    commitGuided();
+    const list = state.entriesByItem.get(guided.itemId) || [];
+    const i = list.findIndex((e) => e.key === tapped);
+    if (i !== -1) goTo('piece', { index: i });
+    return;
+  }
+  const btn = ev.target.closest('[data-g]');
+  if (!btn) return;
+  const e = currentPiece();
+  switch (btn.getAttribute('data-g')) {
+    case 'start':
+      goTo('read', { index: firstOpenIndex(state.entriesByItem.get(guided.itemId) || []) });
+      break;
+    case 'read-next':
+      if (!myName()) { openDialog('welcome'); return; }
+      goTo('piece');
+      break;
+    case 'back':
+      goTo('start');
+      break;
+    case 'ok':
+      if (e && lookRight(e)) advance();
+      break;
+    case 'edit':
+      guided.editing = true;
+      guidedRender();
+      ui.guided.querySelector('.g-box')?.focus();
+      break;
+    case 'cancel':
+      guided.editing = false;
+      guidedRender();
+      ui.guided.querySelector('[data-g="edit"]')?.focus();
+      break;
+    case 'save':
+      if (e && saveTyped(e)) advance();
+      break;
+    case 'prev':
+      commitGuided();
+      if (guided.index > 0) goTo('piece', { index: guided.index - 1 });
+      else goTo('read');
+      break;
+    case 'skip':
+      commitGuided();
+      if (e && !infoOf(e.key).mine) setSkipped(e.key, true);
+      advance();
+      break;
+    case 'next-item':
+      goTo('start', { itemId: pickNext(guided.itemId), index: 0 });
+      break;
+    case 'stop':
+      goTo('stopped');
+      break;
+    case 'keep-going':
+      goTo('start', { itemId: null });
+      break;
+    case 'style':
+      openDialog('note');
+      break;
+    case 'pick':
+      guided.picking = !guided.picking;
+      guidedRender();
+      ui.guided.querySelector(guided.picking ? '.g-pick-search' : '[data-g="pick"]')?.focus();
+      break;
+    case 'pick-item':
+      goTo('start', { itemId: btn.getAttribute('data-item'), picking: false, pickQuery: '' });
+      break;
+    case 'table':
+      setMode('table');
+      ui.results.focus();
+      break;
+    default:
+  }
+});
+
+ui.guided.addEventListener('input', (ev) => {
+  const t = ev.target;
+  if (t.classList.contains('g-pick-search')) {
+    guided.pickQuery = t.value;
+    const list = ui.guided.querySelector('.g-pick-list');
+    if (list) list.innerHTML = pickListItems();
+    return;
+  }
+  if (t.classList.contains('g-box')) {
+    grow(t);
+    guidedWarnings();
+    guidedHint('');
+    pvSchedule();
+  }
+});
+
+// Enter in the note saves like the main button.
+ui.guided.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Enter' || !ev.target.classList?.contains('g-note')) return;
+  ev.preventDefault();
+  ui.guided.querySelector('[data-g="save"], [data-g="ok"]')?.click();
+});
 
 boot();

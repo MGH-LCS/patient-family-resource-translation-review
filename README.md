@@ -1,13 +1,24 @@
 # Translation review
 
 A web page where bilingual staff check every piece of text in the family app,
-one language at a time. For each piece you see the English, the translation the
-app shows now, and a box for your version.
+one language at a time.
 
-- **Looks good**: the current translation is right.
-- **Type in the box**: a better version. It saves when you click away from the box.
-- **Add a note**: anything Mark should know, for example that the English itself is unclear.
-- Where there's no translation yet, the box asks you to write one.
+The page takes you through it one resource (or one part of the app) at a time:
+
+1. **Start**: the page picks the next one nobody has finished.
+2. **Read it through**: see it the way families do, on a phone picture.
+3. **Check each piece**: the English beside the translation.
+   - **Looks right**: the translation is right.
+   - **Suggest a change**: type a better version.
+   - **Skip for now**: come back to it later.
+   - **Note for Mark**: anything he should know, for example that the English itself is unclear.
+4. **Done**: go on to the next one, or stop for today.
+
+Where there's no translation yet, you'll see an **AI draft**: a first version a
+computer wrote, with a dashed outline. Nobody has checked it, so please read it
+closely. **Looks right** approves it; **Suggest a change** lets you fix it.
+
+**Show me everything** (top right) shows all the text in one long list instead.
 
 Mark reads what comes in and decides what goes into the app.
 
